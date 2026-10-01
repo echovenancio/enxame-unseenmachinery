@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Enxame — Humanos × Formigas</title>
+<meta name="description" content="Simulador 3D em Godot. Configure humanos, formigas, arena e ambiente em um octógono com estética PS1.">
+<meta name="theme-color" content="#121110">
+<link rel="icon" href="index.icon.png">
+<style>
+:root {color-scheme:dark;font-family:Arial,Helvetica,sans-serif;font-weight:700;background:#121110;color:#e5dcc6}
+* {box-sizing:border-box} html,body {margin:0;width:100%;height:100%;overflow:hidden}
+#canvas {display:block;width:100%;height:100%;outline:none;touch-action:none}
+#loading {position:fixed;inset:0;display:grid;place-items:center;background:#121110;z-index:10}
+.loader {width:min(430px,calc(100% - 48px));padding:24px;text-align:center}
+.mark {width:46px;height:46px;color:#c3a16a;margin:0 auto 26px;display:none}
+h1 {margin:0 0 12px;color:#e5dcc6;letter-spacing:.14em;font-size:36px;font-weight:900;text-shadow:3px 3px #050604}
+p {color:#b0a38c;line-height:1.5;margin:0 0 32px;font-size:14px;text-transform:uppercase;letter-spacing:.08em}
+.track {height:12px;background:#29251e;overflow:hidden;border:2px solid #7c735c;box-shadow:0 2px 0 #050604}.fill {height:100%;background:repeating-linear-gradient(90deg,#b84b2d 0 7px,#3b241b 7px 8px);width:0;transition:width .2s}
+.meta {display:flex;justify-content:space-between;gap:18px;margin-top:14px;font-size:14px;color:#b0a38c;text-transform:uppercase;letter-spacing:.03em}
+#error {display:none;margin-top:24px;color:#e4a687;white-space:pre-wrap;line-height:1.6;font-size:14px}
+button {font:inherit;cursor:pointer;background:#c3a16a;color:#121110;padding:12px 18px;border:0;margin-top:18px}
+</style>
+$GODOT_HEAD_INCLUDE
+</head>
+<body>
+<canvas id="canvas" tabindex="0" aria-label="Arena 3D: simulador de humanos e formigas">Seu navegador precisa oferecer WebGL 2 e WebAssembly.</canvas>
+<div id="loading"><div class="loader">
+<svg class="mark" viewBox="0 0 64 64" fill="none" aria-hidden="true"><path d="M19 3h26l16 16v26L45 61H19L3 45V19z" stroke="currentColor" stroke-width="2"/><ellipse cx="32" cy="39" rx="6" ry="9" fill="currentColor"/><circle cx="32" cy="20" r="5" fill="currentColor"/><path d="M29 28 17 20m18 8 12-8M28 32H14m22 0h14M28 37 16 47m20-10 12 10M29 16l-6-5m12 5 6-5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+<h1>ENXAME</h1><p>Humanos × Formigas</p>
+<div class="track"><div class="fill" id="progress"></div></div>
+<div class="meta"><span id="state">Abrindo a arena…</span><span id="percent">0%</span></div>
+<div id="error"></div>
+</div></div>
+<script src="$GODOT_URL"></script>
+<script>
+const config = $GODOT_CONFIG;
+const engine = new Engine(config);
+const canvas = document.getElementById('canvas');
+const loading = document.getElementById('loading');
+let failed = false;
+function showError(err) {
+ if (failed) return; failed = true;
+ document.getElementById('state').textContent='Não foi possível abrir a arena';
+ const e=document.getElementById('error');e.style.display='block';
+ e.textContent=String(err.message||err)+'\n\nTente abrir no Chrome ou Firefox atualizado.';
+ const retry=document.createElement('button');retry.textContent='Tentar novamente';retry.onclick=()=>location.reload();e.appendChild(retry);
+}
+window.addEventListener('unhandledrejection',e=>{if(!window.formicariumState)showError(e.reason||'Falha ao iniciar a engine')});
+/* Build may split the 38 MB engine into independently cacheable static assets. */
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async function(input,init) {
+ const url = typeof input==='string' ? input : input instanceof URL ? input.href : input.url;
+ if (window.FORMICARIUM_PARTS && /\/index\.wasm(?:\?.*)?$/.test(new URL(url,location.href).href)) {
+  const parts = window.FORMICARIUM_PARTS;
+  let index=0,reader=null;
+  const body=new ReadableStream({async pull(controller){
+   try {
+    while (true) {
+     if (!reader) {
+      if(index>=parts.length){controller.close();return}
+      const r=await nativeFetch(parts[index++],init);
+      if(!r.ok)throw new Error('Falha ao carregar a engine: '+r.status);
+      reader=r.body.getReader();
+     }
+     const result=await reader.read();
+     if(result.done){reader=null;continue}
+     controller.enqueue(result.value);return;
+    }
+   } catch(err){controller.error(err)}
+  },cancel(){if(reader)reader.cancel()}});
+  return new Response(body,{headers:{'Content-Type':'application/wasm','Content-Length':String(config.fileSizes['index.wasm'])}});
+ }
+ return nativeFetch(input,init);
+};
+// engine-parts-placeholder
+const missing = Engine.getMissingFeatures({threads: false});
+if (missing.length) showError(new Error('Recursos ausentes: '+missing.join(', ')));
+else engine.startGame({canvas:canvas,
+ onProgress(current,total) {
+  if(total>0){const percent=Math.min(99,Math.round(current/total*100));document.getElementById('progress').style.width=percent+'%';document.getElementById('percent').textContent=percent+'%';}
+ }, onPrint(text){console.log(text)}, onPrintError(text){console.error(text)}
+}).then(()=>{document.getElementById('state').textContent='Preparando a arena…';
+ const check=()=>{if(window.formicariumState){loading.style.display='none';canvas.focus();}else requestAnimationFrame(check)};check();
+}).catch(showError);
+</script>
+</body>
+</html>

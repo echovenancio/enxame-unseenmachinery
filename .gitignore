@@ -1,0 +1,19 @@
+# Godot caches and local export credentials
+.godot/
+export_credentials.cfg
+
+# Build output
+/dist/
+/native/
+*.pck
+*.wasm
+*.wasm.part*
+
+# Local tools and editor files
+.openai/
+.sites-runtime/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+Thumbs.db

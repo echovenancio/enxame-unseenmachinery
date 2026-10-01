@@ -1,0 +1,17 @@
+[remap]
+
+importer="font_data_bmfont"
+type="FontFile"
+uid="uid://ckstmb0ukv2sf"
+path="res://.godot/imported/game_font.fnt-986833bd60c2a1925e6708f80683508c.fontdata"
+
+[deps]
+
+source_file="res://assets/game_font.fnt"
+dest_files=["res://.godot/imported/game_font.fnt-986833bd60c2a1925e6708f80683508c.fontdata"]
+
+[params]
+
+fallbacks=[]
+compress=true
+scaling_mode=2

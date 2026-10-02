@@ -2,7 +2,7 @@ extends Control
 const Simulation = preload("res://scripts/simulation.gd")
 const Arena = preload("res://scripts/arena.gd")
 const POST = preload("res://shaders/post.gdshader")
-const HudMeter = preload("res://scripts/hud_meter.gd")
+const HumanHUD = preload("res://scripts/human_hud.gd")
 const BG = Color("121110")
 const PANEL = Color("211e1a")
 const EDGE = Color("5c5140")
@@ -15,6 +15,7 @@ var sim = Simulation.new()
 var arena
 var viewport3d: SubViewport
 var picture: TextureRect
+var human_hud
 var post: ShaderMaterial
 var topbar: Panel
 var sidebar: Panel
@@ -30,7 +31,6 @@ var clock_label: Label
 var detail_label: Label
 var precision_label: Label
 var stat_labels = {}
-var stat_bars = {}
 var render_label: Label
 var log_button: Button
 var log_expanded = false
@@ -175,6 +175,8 @@ func _build_view() -> void:
 	picture.material = post
 	picture.gui_input.connect(_view_input)
 	add_child(picture)
+	human_hud = HumanHUD.new(); human_hud.arena = arena; human_hud.picture = picture
+	add_child(human_hud)
 
 func _build_header() -> void:
 	topbar = _panel(self,Color("171410"))
@@ -300,14 +302,11 @@ func _build_sidebar() -> void:
 
 func _build_hud() -> void:
 	metrics = Control.new(); metrics.mouse_filter = Control.MOUSE_FILTER_IGNORE; add_child(metrics)
-	for data in [["human","HUMANOS","02/02",TEXT],["ants","FORMIGAS","12.000",TEXT],["pain","DOR","0",RED],["energy","FÔLEGO","100%",GOLD]]:
+	for data in [["human","HUMANOS","02/02",TEXT],["ants","FORMIGAS","12.000",TEXT]]:
 		var p = Panel.new(); p.add_theme_stylebox_override("panel",StyleBoxEmpty.new())
 		p.mouse_filter = Control.MOUSE_FILTER_IGNORE; metrics.add_child(p); stat_panels[data[0]] = p
 		var title = _label(data[1],14,MUTED); p.add_child(title)
 		var value = _label(data[2],24,data[3]); p.add_child(value); stat_labels[data[0]] = value
-		if data[0] in ["pain","energy"]:
-			var bar = HudMeter.new(); bar.tint = Color("b84b2d") if data[0]=="pain" else Color("a39a60")
-			p.add_child(bar); stat_bars[data[0]] = bar
 	toolbar = HFlowContainer.new()
 	toolbar.add_theme_constant_override("h_separation",6)
 	toolbar.add_theme_constant_override("v_separation",6); add_child(toolbar)
@@ -412,13 +411,13 @@ func _options() -> Dictionary:
 
 func prepare_round() -> void:
 	running = false; ever_started = false; accumulator = 0.0; budget_alert = false
-	sim.configure(_options()); arena.set_simulation(sim)
+	sim.configure(_options()); arena.set_simulation(sim); human_hud.reset()
 	config_dirty = false; start_button.text = "ENTRAR NA ARENA"
 	pause_button.text = "INICIAR"; _update_precision(); _update_hud()
 
 func start_round() -> void:
 	if config_dirty or sim.finished or not ever_started:
-		sim.configure(_options()); arena.set_simulation(sim); accumulator = 0.0
+		sim.configure(_options()); arena.set_simulation(sim); human_hud.reset(); accumulator = 0.0
 	ever_started = true; running = not sim.finished
 	config_dirty = false; start_button.text = "NOVA RODADA"
 	pause_button.text = "PAUSAR"
@@ -492,15 +491,9 @@ func _compact(value: int) -> String:
 func _update_hud() -> void:
 	if status_label==null: return
 	var stats = sim.summary()
-	var watched = sim.humans[clampi(arena.selected_human,0,sim.humans.size()-1)] if sim.humans.size()>0 else {"pain":0.0,"stamina":0.0}
 	stat_labels.human.text = "%02d/%02d"%[stats.active,sim.humans.size()]
 	stat_labels.ants.text = _compact(stats.alive)
 	stat_labels.ants.tooltip_text = _number(stats.alive)+" formigas vivas, incluindo as que estão nos corpos."
-	stat_labels.pain.text = "%.0f"%minf(watched.pain,100.0)
-	stat_labels.energy.text = "%.0f%%"%watched.stamina
-	stat_bars.pain.value = minf(watched.pain,100.0); stat_bars.energy.value = watched.stamina
-	stat_labels.pain.tooltip_text = "Dor do humano acompanhado."
-	stat_labels.energy.tooltip_text = "Fôlego do humano acompanhado."
 	clock_label.text = _time(sim.elapsed)
 	status_label.text = "ENCERRADO" if sim.finished else ("EM CURSO" if running else ("PAUSADO" if ever_started else "PRONTO"))
 	status_label.add_theme_color_override("font_color",RED if sim.finished else GOLD)
@@ -585,6 +578,8 @@ func _resize_layout() -> void:
 	legend_label.position = Vector2(4,54); legend_label.size = Vector2(side_w-32,18)
 	legend_label.text = "ARRASTE · PINÇA PARA APROXIMAR" if mobile else "ARRASTE PARA OLHAR · RODA PARA APROXIMAR · ESC PARA O MENU"
 	picture.position = Vector2.ZERO; picture.size = screen
+	human_hud.position = picture.position; human_hud.size = screen
+	human_hud.visible = not mobile_controls and not log_expanded
 	var res_h = 360 if quality==0 else 720
 	viewport3d.size = Vector2i(maxi(160,int(screen.x/maxf(1.0,screen.y)*res_h)),res_h)
 	arena.mobile_quality = mobile
@@ -602,14 +597,6 @@ func _resize_layout() -> void:
 	stat_labels.ants.position = Vector2(0,20); stat_labels.ants.size = Vector2(left_w,32)
 	stat_labels.ants.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	stat_labels.ants.add_theme_font_size_override("font_size",24 if mobile else 32)
-	for data in [["pain",75.0],["energy",115.0]]:
-		var p: Panel = stat_panels[data[0]]
-		p.position = Vector2(inset,data[1]); p.size = Vector2(left_w,34)
-		p.get_child(0).position = Vector2.ZERO
-		stat_labels[data[0]].position = Vector2(left_w-64,0); stat_labels[data[0]].size = Vector2(64,20)
-		stat_labels[data[0]].horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		stat_labels[data[0]].add_theme_font_size_override("font_size",14)
-		stat_bars[data[0]].position = Vector2(0,22); stat_bars[data[0]].size = Vector2(left_w,8)
 	var visible_width = 0.0
 	for i in range(toolbar.get_child_count()):
 		var child = toolbar.get_child(i)

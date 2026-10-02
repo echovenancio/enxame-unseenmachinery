@@ -4,6 +4,10 @@ const RETRO = preload("res://shaders/retro.gdshader")
 const ANT_SHADER = preload("res://shaders/ants.gdshader")
 const SWARM_SHADER = preload("res://shaders/swarm.gdshader")
 const ANT_CARDS = preload("res://shaders/ant_cards.gdshader")
+const WING_GROW_TIME = 0.65
+const FLIGHT_END_TIME = 5.2
+const MAX_DEATH_BURSTS = 128
+const DEATH_EFFECT_LIFETIME = 0.6
 
 var sim
 var stage: Node3D
@@ -12,6 +16,10 @@ var ant_batch: MultiMeshInstance3D
 var near_ant_batch: MultiMeshInstance3D
 var attached_batch: MultiMeshInstance3D
 var scent_batch: MultiMeshInstance3D
+var death_batch: MultiMeshInstance3D
+var death_buffer = PackedFloat32Array()
+var death_bursts: Array = []
+var last_death_serial = 0
 var camera: Camera3D
 var environment: WorldEnvironment
 var yaw = 0.66
@@ -45,6 +53,8 @@ var show_scent = false
 var visual_clock = 0.0
 var render_elapsed = 0.0
 var skin_materials: Array = []
+var wing_meshes: Array = []
+var wing_material: StandardMaterial3D
 var ant_mesh: ArrayMesh
 var ant_buffer = PackedFloat32Array()
 var attached_buffer = PackedFloat32Array()
@@ -77,6 +87,9 @@ func _ready() -> void:
 	add_child(sun)
 	for color in [Color(0.55,0.36,0.23),Color(0.70,0.49,0.32),Color(0.35,0.25,0.18),Color(0.79,0.62,0.43),Color(0.48,0.31,0.22)]:
 		skin_materials.append(_plain(color))
+	wing_material = _plain(Color.WHITE)
+	wing_material.vertex_color_use_as_albedo = true
+	for side in [-1.0,1.0]: wing_meshes.append(_make_wing_mesh(side))
 
 func set_simulation(model) -> void:
 	sim = model
@@ -86,6 +99,7 @@ func set_simulation(model) -> void:
 		remove_child(stage); stage.queue_free()
 	stage = Node3D.new(); add_child(stage)
 	rigs.clear(); materials.clear()
+	death_bursts.clear(); last_death_serial = sim.death_serial
 	distance = sim.radius*2.4+3.2
 	_build_chamber()
 	_build_cage()
@@ -234,8 +248,11 @@ func _build_human(index: int) -> void:
 	_box(head,Vector3(0.04,0.055,0.055),Vector3(0,0,0.097),skin)
 	for sign_value in [-1.0,1.0]:
 		_box(head,Vector3(0.028,0.025,0.013),Vector3(sign_value*0.052,0.038,0.089),_plain(Color(0.05,0.043,0.032)))
-	var arms: Array = []; var forearms: Array = []; var legs: Array = []
+	var arms: Array = []; var forearms: Array = []; var legs: Array = []; var wings: Array = []
 	for sign_value in [-1.0,1.0]:
+		var wing = MeshInstance3D.new(); wing.mesh = wing_meshes[wings.size()]
+		wing.material_override = wing_material; wing.position = Vector3(sign_value*0.13*body_width,0.37,-0.14)
+		wing.visible = false; body.add_child(wing); wings.append(wing)
 		var arm = Node3D.new(); arm.position = Vector3(sign_value*0.215*body_width,0.42,0); body.add_child(arm)
 		_limb(arm,Vector2(0.052,0.052),Vector2(0.040,0.043),0.27,skin)
 		var forearm = Node3D.new(); forearm.position = Vector3(0,-0.27,0); arm.add_child(forearm)
@@ -256,11 +273,47 @@ func _build_human(index: int) -> void:
 	badge.font_size = 24; badge.pixel_size = 0.005
 	badge.position = Vector3(0,h.height+0.26,0); badge.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	badge.modulate = Color(0.92,0.82,0.57); badge.outline_size = 4; root.add_child(badge)
+	badge.visible = false # The matching screen-space card now carries this human's number.
 	var shadow = MeshInstance3D.new(); var disk = CylinderMesh.new()
 	disk.top_radius = 0.27; disk.bottom_radius = 0.27; disk.height = 0.002; disk.radial_segments = 12
 	shadow.mesh = disk; shadow.material_override = _plain(Color(0.17,0.18,0.13)); shadow.position.y = 0.004
 	shadow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF; root.add_child(shadow)
-	rigs.append({"index":index,"root":root,"figure":figure,"body":body,"head":head,"arms":arms,"forearms":forearms,"legs":legs,"badge":badge,"torso":torso,"walk_pose":TAU*0.35,"move":0.0,"withdrawal":0.0,"action_pose":0.0,"last_action":0.0,"action_id":0,"stamp_from":Vector3.ZERO,"stamp_to":Vector3.ZERO,"brush_side":index%2,"clock":0.0})
+	rigs.append({
+		"index":index,"root":root,"figure":figure,"body":body,"head":head,
+		"arms":arms,"forearms":forearms,"legs":legs,"wings":wings,"shadow":shadow,"badge":badge,"torso":torso,
+		"walk_pose":TAU*0.35,"move":0.0,"withdrawal":0.0,"clock":0.0,
+		"flight_time":-1.0,"flight_origin":Vector3.ZERO,"flight_direction":Vector3.ZERO,"flight_facing":0.0,
+		"takeoff_feet":[],"takeoff_pose":Vector3.ZERO,"takeoff_body":Vector3.ZERO,"takeoff_head":Vector3.ZERO,
+		"takeoff_arms":[],"takeoff_forearms":[],
+		"action_id":0,"stamp_from":Vector3.ZERO,"stamp_to":Vector3.ZERO,"brush_side":index%2,
+	})
+
+func _make_wing_mesh(side: float) -> ArrayMesh:
+	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# A fan of pointed, faceted feathers keeps the wings legible in the low-poly scene.
+	var tips = [Vector2(0.45,-0.52),Vector2(0.70,-0.61),Vector2(0.93,-0.62),Vector2(1.13,-0.51),Vector2(1.31,-0.34),Vector2(1.43,-0.12),Vector2(1.49,0.13),Vector2(1.43,0.40)]
+	for i in range(tips.size()):
+		var base = Vector2(0.10+i*0.075,-0.02+i*0.055)
+		var tip: Vector2 = tips[i]
+		var middle = base.lerp(tip,0.48)
+		var across = (tip-base).orthogonal().normalized()*(0.115 if i<5 else 0.13)
+		var outline = [base,middle+across,tip,middle-across]
+		var ridge = Vector3(middle.x*side,middle.y,0.045)
+		for j in range(4):
+			st.set_color(Color(0.96,0.92,0.77) if j<2 else Color(0.76,0.76,0.66))
+			var edge = [outline[j],outline[(j+1)%4]] if side>0.0 else [outline[(j+1)%4],outline[j]]
+			for p in edge: st.add_vertex(Vector3(p.x*side,p.y,0))
+			st.add_vertex(ridge)
+		st.set_color(Color(0.69,0.70,0.62))
+		for j in ([0,2,1,0,3,2] if side>0.0 else [1,2,0,2,3,0]):
+			var p: Vector2 = outline[j]; st.add_vertex(Vector3(p.x*side,p.y,-0.015))
+	var cover = [Vector2.ZERO,Vector2(0.30,0.23),Vector2(0.60,0.42),Vector2(1.0,0.53),Vector2(1.38,0.43),Vector2(0.98,0.14),Vector2(0.45,-0.12),Vector2(0.05,-0.16)]
+	for i in range(cover.size()):
+		st.set_color(Color(0.99,0.96,0.84) if i<4 else Color(0.87,0.85,0.72))
+		var edge = [cover[i],cover[(i+1)%cover.size()]] if side>0.0 else [cover[(i+1)%cover.size()],cover[i]]
+		for p in edge: st.add_vertex(Vector3(p.x*side,p.y,0.035))
+		st.add_vertex(Vector3(0.53*side,0.20,0.085))
+	st.generate_normals(); return st.commit()
 
 func _limb(parent: Node3D, top: Vector2, bottom: Vector2, length_value: float, material: Material) -> void:
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -336,6 +389,11 @@ func _build_batches() -> void:
 	ant_buffer.resize(maxi(1,sim.agent_count)*20); ant_buffer.fill(0.0)
 	near_buffer.resize(maxi(1,mini(near_budget,sim.agent_count))*20); near_buffer.fill(0.0)
 	attached_buffer.resize(maxi(1,sim.humans.size()*24)*20); attached_buffer.fill(0.0)
+	var fleck = BoxMesh.new(); fleck.size = Vector3.ONE
+	var fleckmat = _plain(Color.WHITE,true); fleckmat.vertex_color_use_as_albedo = true
+	fleckmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	death_batch = _new_batch(MAX_DEATH_BURSTS*4,fleck,fleckmat)
+	death_buffer.resize(MAX_DEATH_BURSTS*4*16); death_buffer.fill(0.0)
 	var plane = PlaneMesh.new(); plane.size = Vector2(sim.cell_size*0.98,sim.cell_size*0.98)
 	var scentmat = _plain(Color(0.72,0.45,0.12,0.32),true)
 	scentmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -447,6 +505,7 @@ func _update_ants(force: bool = true) -> void:
 	var attached_count = 0
 	for hi in range(sim.humans.size()):
 		var h = sim.humans[hi]; var rig = rigs[hi]
+		if not rig.root.visible: continue
 		for j in range(mini(24,int(h.attached))):
 			var crawl = fposmod(float(j)*0.618034+sim.elapsed*0.016,1.0)
 			var joint: Node3D = rig.legs[j%2].lower if j%3==0 else (rig.forearms[j%2] if j%3==1 else rig.torso)
@@ -474,7 +533,10 @@ func _process(delta: float) -> void:
 	ant_material.set_shader_parameter("simulation_time",motion_time)
 	card_material.set_shader_parameter("simulation_time",motion_time)
 	swarm_material.set_shader_parameter("simulation_time",motion_time)
-	for i in range(rigs.size()): _animate_human(rigs[i],sim.humans[i],delta)
+	for i in range(rigs.size()):
+		# Let the final departure finish after the round ends; pause it with the game otherwise.
+		var animation_delta = delta if sim.humans[i].active or simulation_running or sim.finished else 0.0
+		_animate_human(rigs[i],sim.humans[i],animation_delta)
 	render_elapsed += delta; density_elapsed += delta
 	if render_elapsed>=0.08:
 		render_elapsed = 0.0; _update_ants(false)
@@ -482,6 +544,41 @@ func _process(delta: float) -> void:
 		density_elapsed = 0.0
 		if sim.tick_index!=last_density_tick: _update_density()
 	_update_camera()
+	_update_death_effects(delta if simulation_running or sim.finished else 0.0)
+
+func _update_death_effects(delta: float) -> void:
+	for event in sim.death_events:
+		if event.id<=last_death_serial: continue
+		if death_bursts.size()>=MAX_DEATH_BURSTS: death_bursts.pop_front()
+		death_bursts.append({"event":event,"age":0.0,"started":false,"position":Vector3.ZERO})
+	last_death_serial = sim.death_serial
+	var count = 0
+	for i in range(death_bursts.size()-1,-1,-1):
+		var burst: Dictionary = death_bursts[i]; var event: Dictionary = burst.event
+		if not burst.started:
+			if event.kind==1 and not sim.finished:
+				var h: Dictionary = sim.humans[event.human]
+				if h.active and h.action_id==event.action_id and h.action>0.22: continue
+			burst.position = Vector3(event.pos.x,0.055,event.pos.y)
+			if event.kind==2:
+				var rig: Dictionary = rigs[event.human]
+				burst.position = rig.legs[rig.brush_side].lower.to_global(Vector3(0,-0.07,0.065)) if event.area==0 else rig.torso.to_global(Vector3(0,0,0.12))
+			burst.started = true
+		burst.age += delta
+		if burst.age>=DEATH_EFFECT_LIFETIME:
+			death_bursts.remove_at(i); continue
+		var t: float = burst.age/DEATH_EFFECT_LIFETIME
+		var side = clampf(sim.species.length*magnification*0.4,0.035,0.075)*(1.0-t)
+		for part in range(4):
+			var angle = TAU*(part/4.0+fposmod(event.id*0.618034,1.0))
+			var pos: Vector3 = burst.position+Vector3(cos(angle),0,sin(angle))*(0.018+t*0.16)
+			pos.y += sin(t*PI)*0.10+t*0.08
+			var tint = Color("e8c57c") if part%2==0 else Color("c46a41")
+			tint.a = (1.0-t)*(1.0-t)
+			_write_transform(death_buffer,count,pos,angle,side,tint)
+			count += 1
+	death_batch.multimesh.buffer = death_buffer
+	death_batch.multimesh.visible_instance_count = count
 
 func _bone_basis(direction: Vector3) -> Basis:
 	var y = -direction.normalized()
@@ -499,7 +596,7 @@ func _joint_point(origin: Vector3, target: Vector3, first: float, second: float,
 	if pole.length_squared()<0.001: pole = Vector3.FORWARD-direction*Vector3.FORWARD.dot(direction)
 	return origin+direction*(first*cos_angle)+pole.normalized()*(first*sqrt(maxf(0,1.0-cos_angle*cos_angle)))
 
-func _solve_leg(leg: Dictionary, target: Vector3) -> void:
+func _solve_leg(leg: Dictionary, target: Vector3, planted: bool = true) -> void:
 	var hip: Vector3 = leg.upper.position
 	var line = target-hip
 	var end = hip+line.normalized()*minf(line.length(),0.735)
@@ -507,7 +604,10 @@ func _solve_leg(leg: Dictionary, target: Vector3) -> void:
 	leg.upper.basis = _bone_basis(knee-hip)
 	leg.lower.basis = leg.upper.basis.inverse()*_bone_basis(end-knee)
 	# Flat world-space sole; the supporting foot does not spin with the pelvis.
-	leg.ankle.basis = leg.lower.global_basis.orthonormalized().inverse()*Basis(Vector3.UP,leg.yaw)
+	if planted:
+		leg.ankle.basis = leg.lower.global_basis.orthonormalized().inverse()*Basis(Vector3.UP,leg.yaw)
+	else:
+		leg.ankle.basis = (leg.upper.basis*leg.lower.basis).inverse()*Basis(Vector3.RIGHT,0.32)
 
 func _pose_arm(rig: Dictionary, index: int, target_world: Vector3, weight: float) -> void:
 	if weight<=0.001: return
@@ -527,6 +627,9 @@ func _gesture_weight(progress: float) -> float:
 	return smoothstep(0.0,0.23,progress)*(1.0-smoothstep(0.74,1.0,progress))
 
 func _animate_human(rig: Dictionary, h: Dictionary, delta: float) -> void:
+	if not h.active:
+		_animate_withdrawal(rig,h,delta)
+		return
 	var blend = 1.0-exp(-delta*14.0)
 	var before: Vector3 = rig.root.position
 	var target = Vector3(h.pos.x,0,h.pos.y)
@@ -543,7 +646,6 @@ func _animate_human(rig: Dictionary, h: Dictionary, delta: float) -> void:
 	var cycle_length = scale_value*(0.64+pace*0.35)
 	rig.walk_pose += actual_distance/cycle_length*TAU
 	rig.move = lerpf(rig.move,pace if h.active else 0.0,blend)
-	rig.withdrawal = move_toward(rig.withdrawal,0.0 if h.active else 1.0,delta*1.15)
 	var duration = 1.2 if h.action_kind==2 else 0.55
 	var progress = clampf(1.0-h.action/duration,0,1)
 	var gesture = _gesture_weight(progress) if h.action>0.0 and h.active else 0.0
@@ -556,10 +658,13 @@ func _animate_human(rig: Dictionary, h: Dictionary, delta: float) -> void:
 	var fatigue = 1.0-h.stamina/100.0
 	var calf_brush = brushing if h.action_area==0 else 0.0
 	var breath = sin(visual_clock*(1.6+fatigue*1.7))*0.0025
-	rig.figure.position = Vector3(-side*stamping*0.027,-0.038+breath-rig.withdrawal*0.22-calf_brush*0.30-rig.move*0.02-rig.move*0.006*(1.0-cos(rig.walk_pose*2.0)),0)
+	var impact = smoothstep(0.53,0.61,progress)*(1.0-smoothstep(0.61,0.83,progress)) if h.action_kind==1 and h.action>0 else 0.0
+	var pose_blend = 1.0-exp(-delta*18.0)
+	var figure_target = Vector3(-side*(stamping*0.045+calf_brush*0.018),(-0.038+breath-calf_brush*0.035-rig.move*0.012-impact*0.012)*scale_value,0)
+	rig.figure.position = rig.figure.position.lerp(figure_target,pose_blend)
 	rig.figure.rotation = Vector3.ZERO
-	rig.body.rotation = Vector3(fatigue*0.075+calf_brush*0.85+brushing*0.06+rig.withdrawal*0.40,0,0)
-	rig.head.rotation = Vector3(0.07+brushing*0.16+rig.withdrawal*0.18,0,0)
+	rig.body.rotation = rig.body.rotation.lerp(Vector3(fatigue*0.045+calf_brush*0.24+brushing*0.04,0,0),pose_blend)
+	rig.head.rotation = rig.head.rotation.lerp(Vector3(0.04+brushing*0.10,0,0),pose_blend)
 	var ground_y = 0.045*scale_value
 	if h.action_id!=rig.action_id:
 		rig.action_id = h.action_id
@@ -568,7 +673,7 @@ func _animate_human(rig: Dictionary, h: Dictionary, delta: float) -> void:
 			rig.stamp_from.y = ground_y
 			rig.stamp_to = Vector3(h.action_target.x,ground_y,h.action_target.y)
 	var forward = Vector3(velocity.x,0,velocity.y).normalized() if velocity.length()>0.04 else rig.root.basis.z
-	var step_length = cycle_length*0.31
+	var step_length = minf(cycle_length*0.31,0.26*scale_value)
 	var foot_targets: Array = []
 	for j in range(2):
 		var leg: Dictionary = rig.legs[j]
@@ -579,27 +684,42 @@ func _animate_human(rig: Dictionary, h: Dictionary, delta: float) -> void:
 			var travel = smoothstep(0.12,0.58,progress)
 			world_foot = rig.stamp_from.lerp(rig.stamp_to,travel)
 			var lift = smoothstep(0.05,0.28,progress)*(1.0-smoothstep(0.36,0.60,progress))
-			world_foot.y = ground_y+lift*0.15*scale_value
+			world_foot.y = ground_y+lift*0.24*scale_value
 			if progress>=0.60: leg.plant = rig.stamp_to; leg.yaw = h.stomp_facing
 			leg.swing = lift>0.01; leg.pivot = false; leg.mode = 2
+		elif calf_brush>0.0 and j==side_index:
+			# Bring the shin to the hand instead of dropping the whole body into a squat.
+			world_foot = leg.plant+rig.root.basis.z*calf_brush*0.06*scale_value
+			world_foot.y = ground_y+calf_brush*0.20*scale_value
+			leg.swing = true; leg.pivot = false; leg.mode = 3
 		elif velocity.length()>0.07 and h.action<=0.0 and h.active:
-			if leg.mode!=1: leg.swing = false
+			if leg.mode!=1: leg.swing = false; leg.recovery = false
 			var in_swing = phase>=0.62
+			var recovery: bool = leg.get("recovery",false)
+			var hip: Vector3 = leg.upper.global_position
+			var overreach = Vector2(leg.plant.x-hip.x,leg.plant.z-hip.z).length()>0.38*scale_value
+			if not in_swing and not leg.swing and overreach:
+				recovery = true; leg.recovery_time = 0.0
+			in_swing = in_swing or recovery
 			if in_swing and not leg.swing:
 				leg.from = leg.plant; leg.phase_start = phase
-				leg.to = neutral+forward*(step_length+cycle_length*(1.0-phase))
+				leg.to = neutral+forward*(step_length+cycle_length*(1.0-phase)*pace*0.25)
 				leg.to.y = ground_y
 			if in_swing:
-				var next_landing = neutral+forward*(step_length+cycle_length*(1.0-phase))
+				var next_landing = neutral+forward*(step_length+cycle_length*(1.0-phase)*pace*0.25)
 				leg.to = leg.to.lerp(next_landing,1.0-exp(-virtual_delta*18.0))
 				leg.to.y = ground_y
-				var t = (phase-leg.phase_start)/maxf(0.01,1.0-leg.phase_start)
+				if recovery: leg.recovery_time += virtual_delta
+				var t: float = clampf(leg.recovery_time/0.22,0,1) if recovery else (phase-leg.phase_start)/maxf(0.01,1.0-leg.phase_start)
 				world_foot = leg.from.lerp(leg.to,t*t*(3.0-2.0*t))
 				world_foot.y = ground_y+sin(t*PI)*(0.035+pace*0.035)*scale_value
+				if recovery and t>=1.0:
+					leg.plant = leg.to; leg.yaw = rig.root.rotation.y
+					in_swing = false; recovery = false
 			else:
 				if leg.swing: leg.plant = leg.to; leg.yaw = rig.root.rotation.y
 				world_foot = leg.plant
-			leg.swing = in_swing; leg.pivot = false; leg.mode = 1
+			leg.swing = in_swing; leg.pivot = false; leg.mode = 1; leg.recovery = recovery
 		else:
 			# Finish a small repositioning step before planting; avoid instant resets.
 			var misplaced = Vector2(leg.plant.x-neutral.x,leg.plant.z-neutral.z).length()>0.15*scale_value
@@ -637,22 +757,67 @@ func _animate_human(rig: Dictionary, h: Dictionary, delta: float) -> void:
 		var sweep = smoothstep(0.25,0.68,progress)
 		var brush_target: Vector3
 		if h.action_area==0:
-			brush_target = rig.legs[side_index].ankle.global_position+Vector3(0,(0.47-sweep*0.20)*scale_value,0)
-			brush_target += rig.root.basis.z*0.10*scale_value
+			brush_target = rig.legs[side_index].lower.to_global(Vector3(0,0.08-sweep*0.12,0.065))
 		else:
 			brush_target = rig.body.to_global(Vector3(side*0.06,0.31-sweep*0.18,0.145))
 		_pose_arm(rig,side_index,brush_target,brushing)
 		var brace: Vector3 = rig.legs[1-side_index].upper.global_position+Vector3(0,-0.08*scale_value,0)
 		brace += rig.root.basis.z*0.075*scale_value
 		_pose_arm(rig,1-side_index,brace,calf_brush)
-	if rig.withdrawal>0:
-		for j in range(2):
-			var rest: Vector3 = rig.legs[j].upper.global_position+Vector3(0,-0.08*scale_value,0)
-			rest += rig.root.basis.z*0.085*scale_value
-			_pose_arm(rig,j,rest,rig.withdrawal)
-	rig.badge.visible = camera_mode!=2 or rig.index!=clampi(selected_human,0,rigs.size()-1)
 	rig.badge.position.y = h.height+0.18+rig.figure.position.y
 	rig.badge.modulate = Color(0.69,0.35,0.22) if not h.active else Color(0.92,0.82,0.57)
+
+func _animate_withdrawal(rig: Dictionary, h: Dictionary, delta: float) -> void:
+	if rig.flight_time<0.0:
+		rig.flight_time = 0.0
+		rig.flight_origin = rig.root.position
+		# Depart through the open sides of the chamber, clear of its back and left walls.
+		var outward = Vector3(maxf(0.35,rig.root.position.x),0,maxf(0.55,rig.root.position.z))
+		rig.flight_direction = outward.normalized()
+		rig.flight_facing = rig.root.rotation.y
+		rig.takeoff_pose = rig.figure.position
+		rig.takeoff_body = rig.body.rotation; rig.takeoff_head = rig.head.rotation
+		for j in range(2):
+			rig.takeoff_feet.append(rig.legs[j].ankle.global_position)
+			rig.takeoff_arms.append(rig.arms[j].rotation); rig.takeoff_forearms.append(rig.forearms[j].rotation)
+	rig.flight_time = minf(rig.flight_time+delta,FLIGHT_END_TIME)
+	var t: float = rig.flight_time
+	if t>=FLIGHT_END_TIME:
+		rig.root.visible = false; rig.shadow.visible = false
+		return
+	var scale_value: float = h.height/1.78
+	var grow = smoothstep(0.0,WING_GROW_TIME,t)
+	var lift = smoothstep(WING_GROW_TIME,1.7,t)
+	var travel = smoothstep(1.7,FLIGHT_END_TIME,t)
+	var airborne = smoothstep(WING_GROW_TIME,1.35,t)
+	var settle = smoothstep(0.0,WING_GROW_TIME,t)
+	var flap = sin(maxf(0.0,t-WING_GROW_TIME)*TAU*1.7)
+	rig.withdrawal = grow
+	# Gain enough height to clear the tallest cage rail before moving toward the exit.
+	rig.root.position = rig.flight_origin+rig.flight_direction*travel*(sim.radius*2.4+6.0)
+	rig.root.position.y = 3.25*lift+6.0*travel+flap*0.035*airborne
+	rig.root.rotation.y = lerp_angle(rig.flight_facing,atan2(rig.flight_direction.x,rig.flight_direction.z),smoothstep(0.3,1.7,t))
+	rig.figure.position = rig.takeoff_pose.lerp(Vector3(0,-0.038*scale_value,0),settle)
+	rig.figure.rotation = Vector3(-0.10*airborne,0,0.035*airborne*flap)
+	rig.body.rotation = rig.takeoff_body.lerp(Vector3.ZERO,settle)
+	rig.head.rotation = rig.takeoff_head.lerp(Vector3(-0.12*airborne,0,0),settle)
+	for j in range(2):
+		var side = -1.0 if j==0 else 1.0
+		var wing: MeshInstance3D = rig.wings[j]
+		wing.visible = grow>0.001; wing.scale = Vector3.ONE*maxf(0.001,grow)
+		wing.rotation = Vector3(0,side*0.12*airborne,side*(-1.15*(1.0-grow)+(-0.12-flap*0.62)*grow))
+		var leg: Dictionary = rig.legs[j]
+		var air_foot = Vector3(leg.upper.position.x,0.09+j*0.045,-0.12-j*0.03)
+		var world_foot: Vector3 = rig.takeoff_feet[j].lerp(rig.figure.to_global(air_foot),airborne)
+		_solve_leg(leg,rig.figure.to_local(world_foot),airborne<0.01)
+		leg.swing = airborne>0.0; leg.pivot = false; leg.mode = 4
+		rig.arms[j].rotation = rig.takeoff_arms[j].lerp(Vector3(-0.12,0,side*0.22),settle)
+		rig.forearms[j].rotation = rig.takeoff_forearms[j].lerp(Vector3(-0.35,0,0),settle)
+	rig.shadow.global_position = Vector3(rig.root.position.x,0.004,rig.root.position.z)
+	rig.shadow.scale = Vector3.ONE*lerpf(1.0,0.30,lift)
+	rig.shadow.visible = sim._inside(Vector2(rig.root.position.x,rig.root.position.z))
+	rig.badge.position.y = h.height+0.18+rig.figure.position.y
+	rig.badge.modulate = Color(0.96,0.92,0.77)
 
 func _update_camera() -> void:
 	if camera==null or sim==null: return
@@ -660,8 +825,9 @@ func _update_camera() -> void:
 	var viewport_size = get_viewport().get_visible_rect().size
 	var framing = maxf(1.0,0.95/maxf(0.25,viewport_size.x/viewport_size.y))
 	if camera_mode==2 and sim.humans.size()>0:
-		var h = sim.humans[clampi(selected_human,0,sim.humans.size()-1)]
-		target = rigs[clampi(selected_human,0,rigs.size()-1)].root.position+Vector3(0,0.9,0)
+		var rig: Dictionary = rigs[clampi(selected_human,0,rigs.size()-1)]
+		target = rig.root.position+Vector3(0,0.9,0)
+		if rig.flight_time>=0.0: target = target.lerp(Vector3(0,0.4,0),smoothstep(1.7,4.3,rig.flight_time))
 		camera.position = target+Vector3(sin(yaw)*3.2,1.35,cos(yaw)*3.2)
 	elif camera_mode==1:
 		camera.position = Vector3(0,distance*framing,0.001)

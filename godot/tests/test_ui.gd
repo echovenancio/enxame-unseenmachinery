@@ -20,6 +20,17 @@ func run() -> void:
  assert(scene.sim.humans.size()==3)
  assert(scene.sim.humans[0].mass==78.0 and scene.sim.humans[1].mass==115.0)
  assert(is_equal_approx(scene.sim.humans[1].height,2.02))
+ assert(scene.human_hud.cards.size()==3)
+ scene.sim.humans[0].pain = 24; scene.sim.humans[0].stamina = 82
+ scene.sim.humans[1].pain = 67; scene.sim.humans[1].stamina = 35
+ scene.human_hud.update_positions()
+ assert(scene.human_hud.cards[0].pain.value==24 and scene.human_hud.cards[0].energy.value==82)
+ assert(scene.human_hud.cards[1].pain.value==67 and scene.human_hud.cards[1].energy.value==35)
+ assert(scene.human_hud.cards[0].title.text=="HUMANO 01" and scene.human_hud.cards[1].title.text=="HUMANO 02")
+ for mode in [0,1,2]:
+  scene.arena.camera_mode = mode; scene.arena._update_camera()
+  scene.human_hud.update_positions(); check_cards(scene)
+ scene.arena.camera_mode = 0; scene.arena._update_camera()
  scene.toggle_pause()
  assert(not scene.running)
  scene.toggle_pause()
@@ -52,7 +63,9 @@ func run() -> void:
  scene.prepare_round()
  assert(scene.arena.detail_ant_count==24000)
  assert(scene.arena.detail_ant_count+scene.arena.density_population==10000000)
- assert(scene.metrics.get_child_count()==4)
+ assert(scene.metrics.get_child_count()==2)
+ scene.human_hud.update_positions()
+ check_cards(scene)
  assert(scene.toolbar.position.y+scene.toolbar.size.y<=root.size.y)
  for panel in scene.metrics.get_children():
   assert(panel.get_child(1).position.x+panel.get_child(1).size.x<=panel.size.x)
@@ -61,14 +74,36 @@ func run() -> void:
  scene.start_round()
  scene._toggle_controls()
  assert(scene.sidebar.visible and not scene.metrics.visible and not scene.running)
+ assert(not scene.human_hud.visible)
  scene._toggle_controls()
  assert(scene.running and not scene.sidebar.visible)
+ assert(scene.human_hud.visible)
  scene._toggle_controls()
  assert(scene.sidebar.visible and not scene.metrics.visible)
  scene.start_round()
  assert(not scene.sidebar.visible and scene.metrics.visible)
+ scene.sim.humans[0].active = false
+ for frame in range(330):scene.arena._animate_human(scene.arena.rigs[0],scene.sim.humans[0],1.0/60.0)
+ scene.human_hud.update_positions()
+ assert(not scene.human_hud.cards[0].panel.visible)
+ scene.fields.humans.value = 0; scene.prepare_round()
+ assert(scene.human_hud.cards.is_empty())
  print("UI_TEST_PASS")
  quit()
+
+func check_cards(scene) -> void:
+ var visible_cards: Array[Rect2] = []
+ for card in scene.human_hud.cards:
+  if not card.panel.visible:continue
+  var rect: Rect2 = card.panel.get_rect()
+  assert(Rect2(Vector2.ZERO,scene.human_hud.size).encloses(rect))
+  for other in visible_cards:assert(not rect.intersects(other))
+  visible_cards.append(rect)
+ assert(visible_cards.size()>0)
+ for link in scene.human_hud.links:
+  var anchor: Vector3 = scene.arena.rigs[link.index].badge.global_position
+  var expected: Vector2 = scene.arena.camera.unproject_position(anchor)*scene.picture.size/Vector2(scene.viewport3d.size)
+  assert(link.to.distance_to(expected)<0.01)
 
 func coverage(image: Image) -> float:
  var total = 0.0

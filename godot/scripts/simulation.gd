@@ -6,6 +6,7 @@ const STEP = 0.1
 const GRID = 64
 const MAX_AGENTS = 6000
 const MAX_POPULATION = 10000000
+const MAX_DEATH_EVENTS = 256
 const PROFILES = [
 	{"name":"Lava-pés", "latin":"Solenopsis invicta", "length":0.004, "speed":0.045, "alarm":1.0, "defence":0.90, "sting":0.25, "pain":0.035, "recovery":0.025, "temp":28.0, "color":Color(0.24,0.075,0.025), "note":"2,4–6 mm · morde e ferroa repetidamente · recrutamento por alarme"},
 	{"name":"Tocandira", "latin":"Paraponera clavata", "length":0.025, "speed":0.075, "alarm":0.40, "defence":0.65, "sting":0.035, "pain":4.0, "recovery":0.002, "temp":27.0, "color":Color(0.045,0.045,0.038), "note":"20–30 mm · ferroada muito dolorosa · resposta defensiva local"},
@@ -55,6 +56,8 @@ var history: Array = []
 var last_history = -1
 var tick_index = 0
 var nearest_nest = Vector2.ZERO
+var death_events: Array = []
+var death_serial = 0
 
 func configure(options: Dictionary) -> void:
 	config = options.duplicate(true)
@@ -68,6 +71,7 @@ func configure(options: Dictionary) -> void:
 	crushed = 0; escaped = 0; contacts = 0; exposures = 0; stomps = 0
 	elapsed = 0.0; finished = false; result = ""; tick_index = 0
 	events.clear(); history.clear(); last_history = -1
+	death_events.clear(); death_serial = 0
 	nearest_nest = Vector2(-radius*0.5,0.0)
 	agent_count = mini(population,MAX_AGENTS)
 	cohort_size = maxi(1,ceili(float(population)/MAX_AGENTS))
@@ -315,6 +319,7 @@ func _update_ants(dt: float) -> void:
 		if (temp<3.0 or temp>46.0) and tick_index%10==0:
 			var lost = _stochastic_count(weight[i],0.004)
 			weight[i] -= lost; crushed += lost; alive -= lost
+			_record_ant_deaths(moved,lost)
 
 func _stomp(hi: int, grip: float) -> void:
 	var h = humans[hi]
@@ -345,6 +350,7 @@ func _stomp(hi: int, grip: float) -> void:
 				if weight[i]>0 and absf(q.dot(dir))<half_length+species.length*0.5 and absf(q.dot(side))<half_width+species.length*0.25:
 					var dead = _stochastic_count(weight[i],chance)
 					weight[i] -= dead; killed += dead
+					_record_ant_deaths(Vector2(x[i],z[i]),dead,hi,1,h.action_id+1)
 				i = next[i]
 	alive -= killed; crushed += killed; stomps += 1
 	var cell = _cell(best.x,best.y)
@@ -371,8 +377,17 @@ func _brush(hi: int) -> void:
 	h.action = 1.2; h.action_kind = 2; h.state = "Removendo formigas"
 	h.action_id += 1; h.action_side = h.action_id%2
 	h.action_area = 1 if (h.action_id+hi)%4==0 else 0
+	_record_ant_deaths(h.pos,dead,hi,2,h.action_id,h.action_area)
 	h.cooldown = 2.0+(1.0-h.fitness)*0.8
 	h.stamina = maxf(0.0,h.stamina-0.45)
+
+func _record_ant_deaths(point: Vector2, count: int, human: int = -1, kind: int = 0, action_id: int = 0, area: int = 0) -> void:
+	if count<=0: return
+	# Bounded visual notifications, with no draws from the simulation's seeded RNG.
+	death_serial += 1
+	var event = {"id":death_serial,"pos":point,"count":count,"human":human,"kind":kind,"action_id":action_id,"area":area}
+	if death_events.size()<MAX_DEATH_EVENTS: death_events.append(event)
+	else: death_events[(death_serial-1)%MAX_DEATH_EVENTS] = event
 
 func _return_ground(count: int, p: Vector2) -> void:
 	if count<=0 or agent_count<=0: return

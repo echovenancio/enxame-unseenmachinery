@@ -6,7 +6,7 @@ Visual: low-poly, texturas pequenas com filtro nearest, snapping dos vértices, 
 
 ## Jogar
 
-- Web: [Jogar Enxame](https://enxame.monvenancio4.chatgpt.site). Chrome / Firefox atual, WebGL 2 e WebAssembly. No celular, `MENU` abre o menu de pausa; as abas Luta, Corpo, Arena e Visual reúnem os ajustes. A primeira abertura carrega aproximadamente 38 MB de engine.
+- Web: [Jogar Enxame](https://enxame.unseenmachinery.com/). Chrome / Firefox atual, WebGL 2 e WebAssembly. No celular, `MENU` abre o menu de pausa; as abas Luta, Corpo, Arena e Visual reúnem os ajustes. A primeira abertura carrega aproximadamente 38 MB de engine.
 - Linux x86_64: extrair o ZIP; manter executável e `enxame.pck` juntos. `chmod +x enxame.x86_64` e abrir o executável.
 - Windows x86_64: extrair o ZIP e abrir `enxame.exe`, mantendo `enxame.pck` na mesma pasta.
 

@@ -28,6 +28,48 @@ Importe `godot/project.godot` no [Godot 4.5.2](https://godotengine.org/download/
 
 Instale os templates oficiais da mesma versão para exportar. `python3 tools/build.py --engine /caminho/para/godot` cria Web e divide a engine em arquivos cacheáveis para hospedagem estática. O Web usa single-thread e Compatibility. Presets Linux / Windows também estão no projeto. A build Web precisa de servidor HTTP; não funciona via `file://`.
 
+## Container e deploy no Dokploy
+
+O `Dockerfile` exporta o projeto com **Godot 4.5.2** e serve a versão Web com Nginx sem root, na porta **8080**. A imagem final contém apenas o servidor e os arquivos exportados; o jogo e a simulação executam no navegador. Não precisa de banco, volume persistente ou variáveis de ambiente. O preset single-thread não exige cabeçalhos COOP/COEP.
+
+### Build e validação local
+
+Na raiz do repositório:
+
+```bash
+docker build --target tests -t enxame:tests .
+docker build -t enxame:local .
+docker run -d --name enxame -p 127.0.0.1:8080:8080 enxame:local
+python3 tools/test_container.py http://127.0.0.1:8080
+docker inspect --format '{{.State.Health.Status}}' enxame
+# Abrir http://localhost:8080 para jogar.
+docker rm -f enxame
+```
+
+Com Podman, substitua `docker` por `podman` e use `podman build --format docker` para preservar o health check (o formato OCI padrão não o armazena). O primeiro build baixa o editor oficial e o pacote de templates de cerca de **1,3 GB**, verifica os checksums SHA-512 e mantém apenas os templates Web necessários. Reserve espaço e conexão para essa etapa; os próximos builds reutilizam as camadas. O build nativo aceita amd64 e arm64; a imagem publicada pelo workflow é **linux/amd64**.
+
+O estágio `tests` executa os quatro testes Godot. `tools/test_container.py` verifica HTTP, tipos MIME, gzip, respostas 404, ZIP de fontes e a integridade SHA-256 da engine reconstruída a partir dos fragmentos. O health check usa `/healthz`. Como os nomes dos assets são reutilizados, o Nginx envia `Cache-Control: no-cache` para revalidar arquivos após um deploy.
+
+### Dokploy usando o repositório
+
+1. Crie uma **Application** e conecte este repositório à branch `main` (ou à branch do PR para testar).
+2. Em **Build Type**, selecione **Dockerfile**: **Dockerfile Path** = `Dockerfile`, **Docker Context Path** = `.`, **Docker Build Stage** = `runtime`.
+3. Execute o deploy. Em **Domains**, adicione o domínio com **Container Port** = `8080`, path `/`, e habilite HTTPS.
+4. Abra o domínio para jogar; `/healthz` deve responder `ok`.
+
+O proxy do Dokploy encaminha o tráfego para 8080 dentro do container; não é necessário publicar essa porta no host. Consulte a documentação de [build por Dockerfile](https://docs.dokploy.com/docs/core/applications/build-type) e de [domínios](https://docs.dokploy.com/docs/core/domains).
+
+### Dokploy usando a imagem publicada
+
+O workflow `Container` valida os PRs e, após um push na `main` ou uma execução manual na `main`, publica no GitHub Container Registry:
+
+```text
+ghcr.io/echovenancio/enxame-unseenmachinery:latest
+ghcr.io/echovenancio/enxame-unseenmachinery:sha-<SHA completo do commit>
+```
+
+Após o merge e a primeira execução bem-sucedida, crie uma Application com source **Docker** no Dokploy, informe a imagem, **Docker Registry URL** = `ghcr.io` e configure o domínio com porta 8080. Prefira a tag `sha-...` para fixar uma versão e facilitar rollback. O primeiro pacote GHCR pode ser privado: torne-o público nas configurações do pacote no GitHub ou configure no Dokploy autenticação do registry com um token que tenha `read:packages`. Novas publicações não atualizam um container já em execução; faça um novo deploy no Dokploy para usar a nova versão. Veja a [configuração de Docker Registry](https://docs.dokploy.com/docs/core/Docker).
+
 ## Realismo
 
 Até 6.000 agentes de solo; acima disso, grupos inteiros conservam a população com menor precisão espacial. A ampliação visual inicial é 8×, com opção 1:1; não muda a física. Comportamentos são plausíveis e documentados, mas os coeficientes de contato, dor, retirada e ambiente são heurísticos. Não é um modelo médico ou biomecânico validado.

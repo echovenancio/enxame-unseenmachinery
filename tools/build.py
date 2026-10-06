@@ -13,7 +13,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 def package_source(directory):
     target = directory / 'enxame-godot.zip'
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for name in ['README.md', 'MODEL.md', 'GODOT-LICENSE.txt', 'GODOT-COPYRIGHT.txt', '.gitignore', 'tools/build.py', 'tools/make_game_ui.py']:
+        for name in ['README.md', 'MODEL.md', 'GODOT-LICENSE.txt', 'GODOT-COPYRIGHT.txt', '.gitignore',
+                     'Dockerfile', '.dockerignore', 'deploy/nginx.conf', '.github/workflows/container.yml',
+                     'tools/build.py', 'tools/make_game_ui.py', 'tools/install_godot.sh', 'tools/test_container.py']:
             archive.write(ROOT / name, name)
         for path in sorted((ROOT / 'godot').rglob('*')):
             relative = path.relative_to(ROOT)

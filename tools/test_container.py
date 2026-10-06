@@ -69,7 +69,7 @@ def main():
             with urllib.request.urlopen(base_url + '/healthz', timeout=2) as response:
                 if response.status == 200:
                     break
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
             pass
         time.sleep(1)
     else:

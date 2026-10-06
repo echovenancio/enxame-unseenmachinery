@@ -1,0 +1,16 @@
+# Only versioned project inputs belong in the build context.
+.git
+.godot
+**/.godot
+**/export_credentials.cfg
+dist
+native
+.openai
+.sites-runtime
+.env
+.env.*
+**/__pycache__
+**/*.pyc
+**/*.log
+.DS_Store
+Thumbs.db
